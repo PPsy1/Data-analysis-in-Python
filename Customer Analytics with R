@@ -1,0 +1,439 @@
+library(dplyr)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(scales)
+library(sqldf)
+library(gridExtra)
+
+
+s=read.table('Data.txt',row.names=NULL,header=TRUE,as.is=TRUE)
+names(s) = c('Member_id','Invoice_id','Grandtotal','InvoiceDate','Time')
+head(s)
+
+####### least days - recency
+s$recency <- as.Date("2017-12-31") - as.Date(s$InvoiceDate)
+recency <- aggregate(recency ~ Member_id, data=s, FUN=min)
+head(s)
+
+s$recency=as.character(s$recency)
+
+cu <- merge(s, recency, by="Member_id", all=TRUE, sort=TRUE)
+head(cu,5)
+
+###########any(duplicated(s$Invoice_id))
+######frequency
+fr=aggregate(Invoice_id~ Member_id, data=cu, FUN=length)
+
+cu$InvoiceDate=as.Date(s$InvoiceDate,'%Y-%m-%d')
+
+#sum of money - monetary value
+#----------head(cu)
+mon=aggregate(Grandtotal ~ Member_id, data=cu, FUN=sum)
+#-------head(mon)
+
+
+#                 *****merging*****
+
+#Drop duplicates since we got all the info needed for rfm
+
+
+cc=cu[!duplicated(cu$Member_id), ]
+
+n1=merge(cc, fr, by="Member_id", all=TRUE, sort=TRUE)
+n2=merge(n1,mon,by= 'Member_id',all=TRUE,sort=TRUE)
+n2$recency.x = NULL
+names(n2) = c('Member_id','Invoice_id','Grandtotal','InvoiceDate','Time','recency','freq','monetary_v')
+colnames(n2)
+head(n2)
+
+n2$recency=as.numeric(n2$recency)
+#sr=quantile(n2$recency,probs=seq(0,1,0.20))
+
+ar=table(cut(n2$recency,breaks=quantile(n2$recency,probs=seq(0,1,0.20))))
+ar
+#sf=quantile(n2$freq,probs=seq(0,1,0.20))
+#nrow(n2$freq)
+sm=table(cut(n2$monetary_v,breaks=quantile(n2$monetary_v, probs=seq(0,1,0.20))))
+sm
+aaa=with(n2, table(cut(freq, breaks = unique(quantile(freq, probs=seq(0,1,0.10))))))
+aaa
+head(n2)
+range(n2$freq)
+
+vv=sqldf('select *,case 
+         when recency <=17 then 5
+         when recency <=71 then 4
+         when recency <=152 then 3
+         when recency <=234 then 2
+         else 1 
+         end as rank_recency,
+         case 
+         when freq <=2 then 1
+         when freq <=3 then 2
+         when freq <=4 then 3
+         when freq <=6 then 4
+         else 5
+         end as rank_freq,
+         case
+         when monetary_v <=12.9 then 1
+         when monetary_v <=25.6 then 2
+         when monetary_v <=44.8 then 3
+         when monetary_v <=85.6 then 4
+         else 5
+         end as rank_monetary_v
+         from n2')
+
+#Putting all the ranks together to form the rfm cell
+
+vvv=sqldf('select  Member_id, Invoice_id, Grandtotal, 
+          InvoiceDate, Time, recency, freq, monetary_v, rank_recency, rank_freq, rank_monetary_v ,
+          rank_recency || rank_freq || rank_monetary_v as rfm_cell
+          from vv')
+head(vvv)
+vvv$Time=NULL
+head(vv,14)
+plot(density(vv$monetary_v))
+range(vv$monetary_v)
+
+#Applying weighted mean
+
+vvv$rfm_score=apply(vvv[c("rank_recency", "rank_freq", "rank_monetary_v")], 1, weighted.mean, w = c(0.2, 0.3, 0.5))
+
+#Sorting in descending order
+
+vvc=vvv[order(-vvv$rfm_score),]
+
+#Preparing the dataset for the classes
+cuts <- c(1, 1 - cumsum( c(0.008, .15 ,.25,.30,.14)), 0)
+cuts
+#After finding the exact percentiles for the breaks, we proceed as shown
+rrr=quantile( x = vvc$rfm_score
+              , probs = c( 0.992, 0.842, 0.592, 0.292, 0.152 ))
+
+#adding classes
+vvc$cust_classes <-
+  sapply( X = vvc$rfm_score
+          , FUN = function( i )
+            if ( i >= rrr[ 1 ] ){
+              return( "STAR" )
+              
+            } else if ( i < rrr[ 1 ] &&
+                        i >= rrr[ 2 ] ){
+              return( "Gold" )
+              
+            } else if ( i < rrr[ 2 ] &&
+                        i >= rrr[ 3 ] ){
+              return( "Silver" )
+              
+            } else if ( i < rrr[ 3 ] &&
+                        i >= rrr[ 4 ] ){
+              return( "Bronze" )
+              
+            } else if ( i < rrr[ 4 ] &&
+                        i >= rrr[ 5 ] ){
+              return( "Yellow" )
+              
+            } else{
+              return( "White")
+            }
+          
+  )
+
+ooo=vvc[vvc$cust_classes=='STAR',]
+barplot(table(vvc$cust_classes))
+head(vvc)
+#
+
+new=subset(vvc,select('Member_id','cust_classes'))
+new=vvc[,c('Member_id','cust_classes')]
+head(new)
+nrow(new)
+ss=s
+ss$Time=NULL
+ss$recency=NULL
+new1=merge(ss, new, by="Member_id", all=TRUE, sort=TRUE)
+new1=new1[new1$Grandtotal>0,]
+
+head(new1)
+nrow(new1)
+nrow(s)
+
+# count 
+pp=sqldf('select cust_classes,count(*) as num_of_customers
+         from new group by cust_classes  order by num_of_customers desc ')
+pp
+head(new1)
+
+#Sum(Grandtotal)
+sgt=sqldf('select cust_classes, round(sum(Grandtotal),0)  as n from new1 
+          group by cust_classes order by sum(Grandtotal) desc')
+sgt
+#sum transaction
+st=sqldf('select cust_classes,count(Invoice_id) as sum_of_transactions
+         from new1 group by cust_classes order by sum_of_transactions desc')
+st
+#avg basket
+ab=sqldf('select cust_classes, round(avg(Grandtotal),0) as avg_basket from new1
+         group by cust_classes order by avg_basket desc')
+ab
+#all together
+oi=sqldf('select cust_classes,round(sum(Grandtotal),0) as sum_Grandtotal,
+         count(Invoice_id) as sum_of_transactions,
+         round(avg(Grandtotal),1)as avg_basket
+         from new1 group by cust_classes' )
+
+#merge allcolumns
+tab=merge(pp,oi,all = TRUE,sort=TRUE)
+tab
+
+#random least days from visit
+ee=sqldf('select cust_classes,
+         (as.Date("2017-12-31") - as.Date(s$InvoiceDate)) as s 
+         from new1 group by cust_classes ')
+head(new1)
+nrow(new1)
+nrow(tab)
+#jk=sqldf('select Member_id,cust_classes,
+#   (("2017-12-31") - (InvoiceDate)) as 
+#  avg_least_days 
+#  from new1 
+#  ')
+jk
+
+barplot(table(new1$cust_classes))
+qw=tableGrob(tab,theme=ttheme_default(base_size = 9))
+grid.arrange(qw)
+
+help("tableGrob")
+head(tab)
+table(new1$cust_classes)
+nj=new1[new1$Grandtotal>0,]
+nrow(new1)
+nrow(nj)
+densityplot(new1$Grandtotal)
+range(new1[new1$cust_classes=='STAR',])
+qqq=new1[new1$cust_classes=='STAR',]
+qqq
+range(qqq$Grandtotal)
+range(new1$Grandtotal)
+range(s$Grandtotal)
+head(s)
+fff=new1[new1$Grandtotal>1,]
+head(fff)
+aaa=fff[fff$cust_classes=='STAR',]
+hist(new1$Grandtotal)
+hist((new1[new1$Grandtotal==0.2,]))
+hist(aaa$Grandtotal)
+hist
+
+head(new1[new1$Grandtotal>500,])
+oc=new1[new1$cust_classes =='STAR',]
+order(oc,by=oc$Grandtotal)
+help(order)
+head(oc[order(-oc$Grandtotal),])
+table(vvc$cust_classes)
+
+#Visualization
+
+
+
+ecp=c(a='peru',b='lightgoldenrod2',c='grey64',d='darkgoldenrod2',e='white',f='yellow')
+
+ggplot(tab,aes(x=cust_classes,y=num_of_customers ))+
+  geom_bar(stat='identity',color='black',fill=ecp)+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  labs(title='Customers per segment',x='Class',y='Unique customers')+theme(plot.title = element_text(hjust = 0.5))
+
+
+ggplot(tab,aes(x=cust_classes,y=sum_Grandtotal)) + 
+  geom_bar(stat='identity',color='black',fill=ecp)+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  labs(title='Sum of Grandtotal per segment',x='Class',y=' Sum of Grand total')+theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(tab,aes(x=cust_classes,y=sum_of_transactions)) + 
+  geom_bar(stat='identity',color='black',fill=ecp)+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  labs(title='Sum of transactions per segment',x='Class',y='Sum of transactions')+theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(tab,aes(x=cust_classes,y=avg_basket )) + 
+  geom_bar(stat='identity',color='black',fill=ecp)+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  labs(title='Average basket value per segment',x='Class',y='Average basket value in â‚¬')+theme(plot.title = element_text(hjust = 0.5))
+
+
+new2=merge(new1,fr,by="Member_id", all=TRUE, sort=TRUE)
+tail(new2)
+table(new2$Invoice_id.y)
+
+frr=aggregate(Invoice_id~ Member_id, data=new1, FUN=length)
+
+
+freq_groups=sqldf('select Member_id, case
+                  when freq=1 then "1"
+                  when freq=2 then "2"
+                  when freq=3 then "3"
+                  when freq<20 then "4-20"
+                  else "21-170" end as frq_group from n2')
+
+bb=merge(vvc,freq_groups,by="Member_id", all=TRUE, sort=TRUE)
+
+#plotting 
+
+ggplot(bb,aes(frq_group,fill=cust_classes))+geom_bar(stat='count')+
+  scale_fill_manual(values=
+                      c('peru','lightgoldenrod2','grey64','darkgoldenrod2','white','yellow'))+
+  labs(title='Frequency patterns per segment',x='Times they bought',y='Number of unique customers')+theme(plot.title = element_text(hjust = 0.5))
+
+
+az=sqldf("select strftime('%Y-%m', InvoiceDate) as dt,count(*) as 'Purchases_per_Month' from new1 group by strftime('%m',InvoiceDate) ")
+
+ggplot(az,aes(x=dt,y=Purchases_per_Month,fill=dt))+geom_bar(stat='identity')+
+  coord_flip()+  theme_bw()+theme(legend.position = 'none')+
+  labs(title='Seasonality (Purchases per month)',x='Months',y='Purchases')+
+  theme(plot.title = element_text(hjust = 0.5))+ 
+  scale_fill_manual(values=
+                      c('#203454','#9bbbef','#d6e5fc','#6383b7','#a1bae2','#6383b7','#385a91',
+                        '#6f90c6','#d6e5fc','#d6e5fc','#84a3d6','#456fb2'))
+
+aq=sqldf("select sum(Grandtotal)as avg_purchases_per_month, strftime('%Y-%m', InvoiceDate) as dt,count(*) as 'Purchases_per_Month' from new1 group by strftime('%m',InvoiceDate) ")
+
+
+ggplot(aq,aes(x=dt,y=avg_purchases_per_month,fill=dt))+geom_bar(stat='identity')+
+  coord_flip()+  theme_bw()+theme(legend.position = 'none')+
+  labs(title=' Seasonality (Revenue per month)',x='Months',y='Revenue')+
+  theme(plot.title = element_text(hjust = 0.5))+  
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  scale_fill_manual(values=
+                      c('#2a9340','#b8edc3','#8ff7a5','#4fcc6a','#6ee587','#47c161','#258439',
+                        '#a6f4b6','#9df9b0','#9df9b0','#6ed183','#19702c'))
+
+
+
+
+ggplot(tab,aes(x=cust_classes,y=num_of_customers))+
+  geom_bar(stat='identity',color='black',fill=ecp)+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  labs(title='Customers per segment',x='Class',y='Unique customers')+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+bb$freq_groups=NULL
+
+rec_grp=sqldf('select Member_id,rank_recency, case
+              when recency<85 then "Active"
+              when recency <250 then "At_Risk"
+              else  "Churned" end 
+              as state from vvo')
+vvo=vvc
+vvo$freq_groups=NULL
+bc=merge(vvo,rec_grp,by="Member_id", all=TRUE, sort=TRUE)
+head(bc)
+
+aq=sqldf("select sum(Grandtotal)as avg_purchases_per_month, 
+         strftime('%Y-%m', InvoiceDate) as dt,count(*) as 'Purchases_per_Month' from
+         new1 group by strftime('%m',InvoiceDate) ")
+
+
+
+
+ggplot(bc,aes(state,fill=state))+geom_bar(stat='count')+theme(legend.position = 'none')+
+  labs(title=' State of customers' ,x='State',y='Number of customers')+
+  theme(plot.title = element_text(hjust = 0.5))+  
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+
+  scale_fill_manual(values=c('#53f747','#e5e835','#db622b'))+ coord_flip()+
+  annotate("text", x=3, y=14000, label= "* Reactivation Campaign") +
+  annotate("text", x=2, y=29900, label= "* Retention Campaign")+
+  annotate("text", x=1, y=35000, label= "* Up-sell/Cross-sell Campaign")+
+  annotate("text", x=3.5, y=55000, label= "* Campaign recommendations")
+
+
+#modelling###########################
+bbc=sqldf('select Member_id, Invoice_id,Grandtotal,
+InvoiceDate, recency, freq, monetary_v,state,cust_classes,case
+          when cust_classes ="STAR" then 6
+          when cust_classes="Gold" then 5
+          when cust_classes="Silver" then 4          
+          when cust_classes="Bronze" then 3
+          when cust_classes="Yellow" then 2
+          else  1 end 
+          as n_class from bc')
+head(bbc)
+
+
+########logistic Regression
+
+
+
+model <- glm(n_class~ monetary_v,data=bbc)
+model
+summary(model)
+newdata = data.frame(monetary_v=300)
+round(predict(model, newdata,type='response'))
+head(bbc)
+#############
+
+
+
+# Compute the analysis of variance
+res.aov <- aov(monetary_v ~cust_classes, data = bbc)
+# Summary of the analysis
+summary(res.aov)
+
+
+
+nv=sqldf('select *,round(((sum(sum_Grandtotal)/count(num_of_customers))/100000),-5) as perc from tab group by cust_classes')
+nv
+sum(nv$perc)
+
+
+lbls=nv$perc
+lbls=paste(nv$cust_classes,lbls)
+lbls=paste(lbls,'%',sep='')
+pie(nv$perc, labels = lbls,
+    main = "Revenue by customer class ",
+    col=c('peru','lightgoldenrod2','darkgoldenrod2','grey64','white','yellow'))
+
+
+
+neww=sqldf('select * ,strftime("%Y-%m", InvoiceDate) as month from new1')
+head(new1)
+neww=new1
+head(neww)
+neww %>%
+  mutate(month = format(as.Date(InvoiceDate), format = "%Y-%m"))
+
+purchases <- #calculates all purchases by month
+  neww %>% 
+  group_by(Member_id) %>%
+  slice(1) %>%
+  group_by(month) %>%
+  summarise(tot_purchases = n())
+
+last_purchase_date <- #finds the last time a customer actually bought anything (i.e., when they "churned" away)
+  neww %>%
+  group_by(Member_id, month) %>%
+  summarise(tot_uses = n()) %>%
+  group_by(Member_id) %>%
+  filter(month == max(month)) %>%
+  group_by(month) %>%
+  summarise(stopped_purchasing = n())
+
+purchases %>%
+  full_join(last_purchase_date) %>%
+  mutate(cum_sum_first_purchase = cumsum(tot_purchases), 
+         cum_sum_stopped = cumsum(stopped_purchasing), 
+         Churn = cum_sum_stopped/cum_sum_first_purchase, 
+         Retention = 1 - Churn) %>%
+  select(month, Churn, Retention) %>%
+  melt(id.vars = "month") %>% # melt the data frame for easy plotting
+  ggplot(aes(x = month, y = value, fill = variable)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(name = "", values = c("#d8432f", "#5688d8")) +
+  labs(x = "Month", y = "") +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        panel.background = element_blank())+
+  labs(title='  Retention / Churn Rates')+
+  theme(plot.title = element_text(hjust = 0.5))
