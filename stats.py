@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-
+#Automated file creation with the results of an analysis about delivery dates where the user imports any csv and gets results in a txt.
 
 import os 
 import pandas as pd
